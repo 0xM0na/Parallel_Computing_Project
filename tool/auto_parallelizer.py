@@ -47,28 +47,57 @@ def is_safe_loop(body, loop_var):
 
     for token in forbidden:
         if token in body:
-            return False, f"contains side effect: {token}"
+            return False, f"contains side effect: {token}", {}
 
     if re.search(rf"\[\s*{loop_var}\s*(\+|-)\s*\d+", body):
-        return False, "possible loop-carried dependency"
+        return False, "possible loop-carried dependency", {}
 
     locals_inside = declared_locals(body)
-
     body_no_headers = re.sub(r"for\s*\([^)]*\)", "", body)
 
+    # Detect reduction patterns: var += expr, var -= expr, etc.
+    reductions = {}
+    reduction_pattern = r"\b(\w+)\s*(\+=|-=|\*=|/=|%=)\s*"
+    
+    for match in re.finditer(reduction_pattern, body_no_headers):
+        name = match.group(1)
+        op_str = match.group(2)
+        
+        # Only treat as reduction if it's a shared scalar (not loop var, not local)
+        if name != loop_var and name not in locals_inside:
+            # Map += to +, -= to -, etc.
+            op = op_str[0]  # Extract first character (+, -, *, /, %)
+            reductions[name] = op
+
+    # Check for loop-carried dependencies (var = var op expr pattern)
+    self_assign_pattern = r"\b(\w+)\s*=\s*\1\s*[+\-*/]"
+    for match in re.finditer(self_assign_pattern, body_no_headers):
+        name = match.group(1)
+        if name != loop_var and name not in locals_inside:
+            # This is also a reduction
+            reductions[name] = "+"
+
+    # If we found reductions, it's still safe
+    if reductions:
+        return True, f"contains reductions: {', '.join(reductions.keys())}", reductions
+
+    # Check for other shared scalar updates (those are not safe)
     update_patterns = [
-        r"\b(\w+)\s*(?:\+\+|--|\+=|-=|\*=|/=)",
-        r"\b(\w+)\s*=\s*\1\s*[+\-*/]",
+        r"\b(\w+)\s*(?:\+\+|--)",
+        r"\b(\w+)\s*=\s*[^;{}]*",  # General assignment
     ]
 
     for pattern in update_patterns:
         for match in re.finditer(pattern, body_no_headers):
             name = match.group(1)
-
             if name != loop_var and name not in locals_inside:
-                return False, f"updates possible shared scalar: {name}"
+                # Check if it's a simple increment/decrement
+                if "++" in body or "--" in body:
+                    if re.search(rf"\b{name}\s*(?:\+\+|--)", body_no_headers):
+                        continue  # Allow ++ and -- on shared scalars (they're reductions)
+                return False, f"updates possible shared scalar: {name}", {}
 
-    return True, "safe by conservative analysis"
+    return True, "safe by conservative analysis", {}
 
 
 def discover_loops(src):
@@ -80,7 +109,7 @@ def discover_loops(src):
         close_brace = find_matching_brace(src, open_brace)
 
         body = src[open_brace + 1:close_brace]
-        safe, reason = is_safe_loop(body, loop_var)
+        safe, reason, reductions = is_safe_loop(body, loop_var)
 
         loops.append({
             "start": match.start(),
@@ -89,6 +118,7 @@ def discover_loops(src):
             "var": loop_var,
             "safe": safe,
             "reason": reason,
+            "reductions": reductions,
         })
 
     return loops
@@ -129,9 +159,19 @@ def transform(src):
     transformed = src
 
     for loop in sorted(selected, key=lambda x: x["start"], reverse=True):
+        pragma = "#pragma omp parallel for schedule(static)"
+        
+        # Add reduction clause if reductions were detected
+        if loop.get("reductions"):
+            reduction_clauses = ", ".join(
+                f"reduction({op}:{var})"
+                for var, op in loop["reductions"].items()
+            )
+            pragma += f" {reduction_clauses}"
+        
         transformed = (
             transformed[:loop["start"]]
-            + "#pragma omp parallel for schedule(static)\n"
+            + pragma + "\n"
             + transformed[loop["start"]:]
         )
 
@@ -162,9 +202,12 @@ def main():
 
     for loop in loops:
         status = "PARALLELIZED" if loop["line"] in selected_lines else "SKIPPED"
+        reduction_info = ""
+        if loop.get("reductions"):
+            reduction_info = f" [reductions: {', '.join(loop['reductions'].keys())}]"
         print(
             f"Line {loop['line']}: for({loop['var']}) -> "
-            f"{status} ({loop['reason']})"
+            f"{status} ({loop['reason']}){reduction_info}"
         )
 
     print()
