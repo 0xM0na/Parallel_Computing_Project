@@ -37,7 +37,8 @@ def declared_locals(body):
 
 def find_enclosing_function(src, position):
     """Find the function name that contains the given position in source code."""
-    func_pattern = r"^(?:int|void|double|float|char|long|unsigned|static)*\s+(\w+)\s*\([^)]*\)\s*\{"
+    # More flexible regex: handles return types, static, etc. (zero or more type keywords)
+    func_pattern = r"^(?:(?:int|void|double|float|char|long|unsigned|static)\s+)*(\w+)\s*\([^)]*\)\s*\{"
     
     # Search backwards line by line
     text_before = src[:position]

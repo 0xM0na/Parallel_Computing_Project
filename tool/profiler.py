@@ -25,11 +25,11 @@ def profile_hot_functions(src_path, binary_path, run_args=None, threshold=5.0):
         binary_path = Path(str(binary_path) + '.exe')
     
     try:
-        # Step 1: Compile with profiling flags
+        # Step 1: Compile with profiling flags (-O0 for accurate profiling, not -O2)
         compile_cmd = [
             "gcc",
             "-pg",
-            "-O2",
+            "-O0",
             str(src_path),
             "-o",
             str(binary_path),
@@ -55,6 +55,12 @@ def profile_hot_functions(src_path, binary_path, run_args=None, threshold=5.0):
             print(f"[Profile] Execution failed: {result.stderr}")
             return hot_functions
         
+        # Verify gmon.out was created
+        gmon_path = Path(binary_dir) / "gmon.out"
+        if not gmon_path.exists():
+            print(f"[Profile] gmon.out not found in {binary_dir}. Profiling failed.")
+            return hot_functions
+        
         # Step 3: Run gprof and parse output
         print(f"[Profile] Running gprof analysis...")
         gprof_cmd = ["gprof", str(binary_path), "gmon.out"]
@@ -76,9 +82,13 @@ def profile_hot_functions(src_path, binary_path, run_args=None, threshold=5.0):
                 continue
             
             if in_table:
-                # Stop at the next section
-                if line.strip() == "" or "call graph" in line.lower():
+                # Stop only at the call graph section (blank lines are allowed in the table)
+                if "call graph" in line.lower():
                     break
+                
+                # Skip empty lines within the table
+                if line.strip() == "":
+                    continue
                 
                 # Parse lines: " 94.5       2.31     2.31        1  2310.00  2310.00  main"
                 parts = line.split()
